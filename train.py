@@ -8,35 +8,41 @@ import pickle
 import sys
 from rominfo import *
 
+# Obtém a memória RAM do ambiente Retro e a retorna como um array NumPy.
+# Isso é usado para extrair informações específicas do estado do jogo.
 def getRam(env):
     ram = []
     for k, v in env.data.memory.blocks.items():
         ram += list(v)
     return np.array(ram)
-    
-# Classe que contém o método work responsável por executar o treinamento, dessa forma é possível ter vários "workers" para paralelilzar o treino.
+
+# Classe que representa um "worker" responsável por treinar um genoma específico.
+# Cada worker executa o treinamento de forma isolada, permitindo paralelização.
 class Worker(object):
     def __init__(self, genome, config):
+        # Inicializa o worker com um genoma e as configurações da rede neural.
         self.genome = genome
         self.config = config
 
-    # Treinamento do agente     
+    # Executa o treinamento do agente para um genoma específico.
     def work(self):
         arguments = sys.argv[1:]
 
-        self.env = retro.make(game = 'SuperMarioWorld-Snes', state = 'YoshiIsland2', players = 1)
+        # Inicializa o ambiente do jogo usando a biblioteca Retro.
+        self.env = retro.make(game='SuperMarioWorld-Snes', state='YoshiIsland2', players=1)
 
-        # Inicia o ambiente do 0 e retorna a imagem observavel
+        # Inicia/reinicia o ambiente e obtém o estado inicial (imagem observável).
         ob = self.env.reset()
 
-        # Obtem a resolucao do jogo e divide por 8 para diminuir os inputs da rede neural
+        # Reduz a resolução da tela em um fator de 8 para diminuir a quantidade de dados processados.
         inx, iny, _ = self.env.observation_space.shape
-        inx = int(inx/8)
-        iny = int(iny/8)
+        inx = int(inx / 8)
+        iny = int(iny / 8)
 
-        # Cria a rede
+        # Cria a rede neural para o genoma usando as configurações fornecidas.
         network = neat.nn.recurrent.RecurrentNetwork.create(self.genome, self.config)
 
+        # Inicializa variáveis para acompanhar desempenho e progresso do agente.
         fitness = 0
         counter = 0
         xpos = 0
@@ -47,98 +53,100 @@ class Worker(object):
         done = False
         while not done:
             if "SHOW_GAME" in arguments:
-                # Abre uma janela e renderiza o frame do jogo
+                # Renderiza o ambiente (mostra a janela do jogo).
                 self.env.render()
 
-            # Reduzindo a imagem e as cores para uma escala de cinza para que hajam menos inputs na rede
+            # Converte a imagem do jogo para tons de cinza e reduz sua resolução para simplificar os inputs.
             ob = cv2.resize(ob, (inx, iny))
             ob = cv2.cvtColor(ob, cv2.COLOR_BGR2GRAY)
             ob = np.reshape(ob, (inx, iny))
-            cv2.waitKey(1)
+            cv2.waitKey(1)  # Aguarda brevemente para evitar bugs no render.
             img_array = np.ndarray.flatten(ob)
 
-            # Informacoes da tela como input para rede neural
+            # Usa os dados da tela como entrada para a rede neural.
             nn_output = network.activate(img_array)
 
-            # Output da rede eh usado como input de um frame no jogo
+            # Aplica a saída da rede como ação no jogo.
             ob, _, done, info = self.env.step(nn_output)
 
-            # Salva score do jogo
+            # Atualiza a pontuação do jogo.
             score = info['score']
             if score > max_score:
                 max_score = score
 
-            # Verifica se a fase acabou ou se Mario parou de evoluir
+            # Verifica se o Mario está progredindo ou se está travado.
             _, xpos, _ = getInputs(getRam(self.env))
             if xpos > xpos_max:
                 xpos_max = xpos
-                counter = 0
+                counter = 0  # Reinicia o contador de inatividade.
             else:
                 counter += 1
+
+            # Encerrar o loop se o agente estiver inativo por muito tempo ou a fase acabar.
             if done or counter == 200:
                 done = True
-                print("Genoma: " + str(self.genome.key) + ", Fitness: " + str(fitness) + ", Posição Final X: " + str(xpos) + ", Score Final: " + str(max_score))
+                print(f"Genoma: {self.genome.key}, Fitness: {fitness}, Posição Final X: {xpos}, Score Final: {max_score}")
 
-            # 3 pontos para cada pixel X, 1 ponto para cada ponto de score
+            # Calcula o fitness com base na posição X e na pontuação.
             fitness = xpos * 3 + max_score
 
-            # 5000 é um pouco após o final da fase
+            # Premia com um valor de fitness muito alto se o Mario terminar a fase.
             if xpos_max > 5000:
                 fitness = 100000 + max_score
 
+        # Fecha a janela do jogo ao finalizar.
         if "SHOW_GAME" in arguments:
             self.env.render(close=True)
 
+        # Salva o fitness final no genoma.
         self.genome.fitness = int(fitness)
         return int(fitness)
 
-# A função de treinamento do agente que o neat espera receber, cria um novo worker para avaliar o genoma recebido
+# Avalia o desempenho de um genoma criando um worker para treinar e testar.
 def eval_genomes(genome, config):
     worky = Worker(genome, config)
     return worky.work()
-    
+
 def main():
-    # Carrega configurações da rede neural
+    # Carrega as configurações para a rede neural do arquivo de configuração.
     config = neat.Config(neat.DefaultGenome, neat.DefaultReproduction, neat.DefaultSpeciesSet, neat.DefaultStagnation, 'config-feedforward')
 
-    # Verifica se há um checkpoint de treino, se não, começa uma população do 0
+    # Verifica se há um checkpoint para retomar o treinamento.
     if os.path.exists('checkpoint'):
         p = neat.Checkpointer.restore_checkpoint('checkpoint')
     else:
         p = neat.Population(config)
 
-    # Adiciona informações estatísticas à saída no console
+    # Adiciona relatórios para monitorar o progresso do treinamento.
     p.add_reporter(neat.StdOutReporter(True))
     stats = neat.StatisticsReporter()
     p.add_reporter(stats)
-    p.add_reporter(neat.Checkpointer(1))
+    p.add_reporter(neat.Checkpointer(1))  # Salva um checkpoint por geração.
 
     print("Para parar o treinamento aperte CTRL-C após o checkpoint de uma geração ser salvo")
 
     while True:
-        # Faz a paralelização da execução dos genomas para agilizar o treinamento, quanto maior o número de workers (primeiro parâmetro) mais processos serão
-        # criados e portanto haverá um maior consumo de RAM e CPU
+        # Paraleliza a avaliação de genomas para acelerar o treinamento.
+        # O número de workers define quantos processos simultâneos são executados.
         pe = neat.ParallelEvaluator(10, eval_genomes)
 
-        # Roda a função de treino da população e retorna o melhor genoma, caso o programa seja interrompido o checkpoint será a ultima geração completa. O 
-        # segundo parametro representa o número de gerações até que o programa encerre
+        # Roda o treinamento por uma geração e obtém o melhor genoma.
         winner = p.run(pe.evaluate, 1)
 
-        # Salva o melhor genoma
+        # Salva o melhor genoma em um arquivo pickle.
         with open('best.pkl', 'wb') as output:
             pickle.dump(winner, output, 1)
 
-        # Neat salva os checkpoints como neat-checkpoint-numerodageracao, deixando o ambiente cheio de arquivos, não há (ou não encontrei)
-        # uma forma de salvar apenas a última geração com um nome escolhido, então fiz essa forma de apagar as demais gerações e renomear a última para checkpoint
-        # coloquei esse código em um loop, pois foi a melhor forma de poder cancelar o treinamento salvando os dados e sem aumentar a complexidade do programa
+        # Gerencia os arquivos de checkpoint, mantendo apenas o mais recente.
         checkpoint_files = [filename for filename in os.listdir() if re.match(r'neat-checkpoint-\d+', filename)]
         if checkpoint_files:
-            latest_checkpoint = max(checkpoint_files, key = lambda x: int(re.search(r'\d+', x).group()))
+            latest_checkpoint = max(checkpoint_files, key=lambda x: int(re.search(r'\d+', x).group()))
             for checkpoint_file in checkpoint_files:
                 if checkpoint_file != latest_checkpoint:
                     os.remove(checkpoint_file)
                 else:
                     os.rename(checkpoint_file, 'checkpoint')
+
         print("Checkpoint salvo! Aperte CTRL-C para sair")
 
 if __name__ == "__main__":
